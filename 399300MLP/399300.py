@@ -10,7 +10,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error 
-SEED = 123
+SEED = 1
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
@@ -43,6 +43,7 @@ print("正在检查设备...")
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"将使用设备: {device}")
 train_df['date'] = pd.to_datetime(train_df['date'])
+train_df['result'] = train_df['OT'].pct_change()
 X_list = []
 y_list = []
 print("正在构建特征和标签...")
@@ -50,7 +51,7 @@ for i in tqdm(range(20,len(train_df))):
     window = train_df.iloc[i-20:i]
     features = window[list(idx_fea)].values
     x_input = features.flatten()
-    y_target = train_df.loc[i, out_fea]
+    y_target = train_df.loc[i, 'result']
     X_list.append(x_input)
     y_list.append(y_target)
 X = np.stack(X_list)
@@ -127,14 +128,13 @@ predictor = model(input_dim).to(device)
 predictor.load_state_dict(torch.load('best_model.pth'))
 predictor.eval()
 # 获取预测结果，y未标准化，此结果即为最终预测值
-predictions = []
 with torch.no_grad():
     predictions = predictor(X_test_tensor).cpu().numpy()
 # 准备真实值和预测值
 actual = y_test.flatten()
 predictions = predictions.flatten()
 # 计算五项指标 
-print(f"\n--- {out_fea} 预测评估指标 ---")
+print(f"\n---  预测评估指标 ---")
 # MAE 
 mae = mean_absolute_error(actual, predictions)
 print(f"平均绝对误差 (MAE): {mae:.4f}")
@@ -147,23 +147,20 @@ if len(y_val_raw) > 0:
 else:
     last_val_target = train_df.loc[val_end_idx-1, out_fea]
 # 拼接，进行列操作
-previous_day_values = np.concatenate([last_val_target, y_test[:-1].flatten()])
-actual_change = actual - previous_day_values
-predicted_change = predictions - previous_day_values
-correct_direction = (actual_change * predicted_change) >= 0
+correct_direction = (actual * predictions) >= 0
 acc = np.mean(correct_direction)
 print(f"方向预测准确性 (ACC): {acc:.2%}")
-# 如果预测第二天会上涨，全买
-position = np.where(predictions > previous_day_values, 1, 0)
-# 计算每日的实际收益率
-actual_returns = np.divide(actual_change, previous_day_values, 
-                           out=np.zeros_like(actual_change, dtype=float), 
-                           where=previous_day_values!=0)
-# 策略每日收益率 = 实际每日收益率 * 头寸信号（这里只有1和0）
-strategy_returns = actual_returns * position
-# CR 
+# CR 和 Sharpe Ratio
+# 策略信号：如果预测收益率为正，则持有头寸
+position = np.where(predictions > 0, 1, 0)
+
+# 策略每日收益率 = 实际每日收益率 * 头寸信号
+strategy_returns = actual * position
+
+# CR
 cumulative_return = (np.prod(1 + strategy_returns) - 1)
 print(f"策略累计回报率 (CR): {cumulative_return:.2%}")
+
 # Sharpe Ratio
 std_dev = np.std(strategy_returns)
 if std_dev > 0:
@@ -171,6 +168,7 @@ if std_dev > 0:
 else:
     sharpe_ratio = 0.0
 print(f"策略年化夏普比率: {sharpe_ratio:.4f}")
+
 # 保存
 print("\n正在生成预测结果文件...")
 test_dates = train_df.iloc[val_end_idx + 20:].reset_index(drop=True)['date']
